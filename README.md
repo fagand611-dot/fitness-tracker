@@ -35,10 +35,24 @@ device, with JSON backup and CSV export.
 
 ## Run locally
 
+Needs [Node.js](https://nodejs.org) 22 or newer. Works on Windows, macOS and Linux.
+
+Start the app, then open http://localhost:8080:
+
 ```bash
-npm start          # serves on http://localhost:8080
-npm test           # unit tests for scheduling / progression / stats
+npm start
 ```
+
+Run the unit tests (scheduling, progression, stats):
+
+```bash
+npm test
+```
+
+`npm start` also prints a `http://192.168.x.x:8080` address you can open on your
+phone over the same Wi-Fi. That is handy for a quick look, but browsers only allow
+install and offline mode over HTTPS, so for daily use put it on GitHub Pages
+(below).
 
 There is no build step and there are no dependencies: plain HTML, CSS and ES modules.
 
