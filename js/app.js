@@ -478,7 +478,8 @@ function pickExercise(onPick) {
     const groups = {};
     for (const e of matches) (groups[e.group || 'Other'] ||= []).push(e);
     const exact = data.exercises.some((e) => e.name.toLowerCase() === q);
-    list.replaceChildren(
+    list.replaceChildren();
+    append(list, [
       q && !exact ? h('button', { class: 'btn primary block', style: 'margin-bottom:8px', onclick: () => {
         const name = search.value.trim().replace(/\s+/g, ' ');
         const e = { id: L.uid(), name: name[0].toUpperCase() + name.slice(1), group: 'Other' };
@@ -491,7 +492,7 @@ function pickExercise(onPick) {
         h('div', { class: 'card', style: 'padding:0 14px' }, groups[g].map((e) =>
           h('button', { class: 'list-item', onclick: () => onPick(e.id) }, h('span', { class: 'grow' }, e.name), h('span', { class: 'chev' }, '+')))),
       ]),
-      !matches.length && !q ? h('div', { class: 'empty' }, 'No exercises') : null);
+      !matches.length && !q ? h('div', { class: 'empty' }, 'No exercises') : null]);
   };
   search.addEventListener('input', renderList);
   renderList();
