@@ -19,6 +19,9 @@ device, with JSON backup and CSV export.
 - **Live workout logging**: each set is pre-filled from last time. Tap ✓ to log
   it. The previous session's numbers are shown alongside, and you can add, remove
   or swap exercises mid-workout. The screen stays awake.
+- **Supersets**: link consecutive exercises in the programme editor (or
+  mid-workout). Sets alternate A1 → B1 → A2 …, the next set is highlighted, and
+  rest starts only after each round.
 - **Rest timer**: starts automatically when you tick a set, with −15 / +15 /
   skip. It beeps, and vibrates on Android.
 - **Progression hints** (double progression): when you hit the top of the rep
