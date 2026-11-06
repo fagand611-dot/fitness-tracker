@@ -15,16 +15,29 @@ const SEED_EXERCISES = [
   ['Rear Delt Fly', 'Shoulders'],
   ['Barbell Curl', 'Arms'], ['Dumbbell Curl', 'Arms'], ['Hammer Curl', 'Arms'],
   ['Triceps Pushdown', 'Arms'], ['Overhead Triceps Extension', 'Arms'], ['Skull Crusher', 'Arms'],
-  ['Plank', 'Core'], ['Hanging Leg Raise', 'Core'], ['Cable Crunch', 'Core'],
+  ['Plank', 'Core', true], ['Hanging Leg Raise', 'Core'], ['Cable Crunch', 'Core'],
 ];
+
+// Added in seed version 2 (circuits). The third value marks exercises that are
+// usually done for time, so they default to a timed target.
+const SEED_V2 = [
+  ['Burpee', 'Conditioning'], ['Kettlebell Swing', 'Conditioning'], ['Goblet Squat', 'Legs'],
+  ['Mountain Climber', 'Conditioning', true], ['Jumping Jack', 'Conditioning', true], ['Box Jump', 'Conditioning'],
+  ['Battle Ropes', 'Conditioning', true], ['Jump Rope', 'Conditioning', true], ["Farmer's Carry", 'Conditioning', true],
+  ['Wall Ball', 'Conditioning'], ['Rowing Machine', 'Conditioning', true], ['Assault Bike', 'Conditioning', true],
+  ['Sit-up', 'Core'], ['Russian Twist', 'Core'],
+];
+const SEED_VERSION = 2;
+const seedEx = ([name, group, timed]) => ({ id: uid(), name, group, ...(timed ? { timed: true } : {}) });
 
 export const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#14b8a6', '#ec4899'];
 
 function fresh() {
   return {
     version: 1,
+    seedVersion: SEED_VERSION,
     settings: { unit: 'kg', defaultRest: 120, increment: 2.5, sound: true },
-    exercises: SEED_EXERCISES.map(([name, group]) => ({ id: uid(), name, group })),
+    exercises: [...SEED_EXERCISES, ...SEED_V2].map(seedEx),
     programmes: [],
     schedule: [],
     sessions: [],
@@ -44,12 +57,21 @@ export function load() {
 
 function migrate(d) {
   const base = fresh();
-  return {
+  const out = {
     ...base,
     ...d,
     settings: { ...base.settings, ...(d.settings || {}) },
     exercises: d.exercises?.length ? d.exercises : base.exercises,
   };
+  if ((d.seedVersion || 1) < 2) {
+    // Add the conditioning exercises once, without duplicating names you already have.
+    const have = new Set(out.exercises.map((e) => e.name.toLowerCase()));
+    for (const row of SEED_V2) if (!have.has(row[0].toLowerCase())) out.exercises.push(seedEx(row));
+    const plank = out.exercises.find((e) => e.name === 'Plank');
+    if (plank) plank.timed = true;
+  }
+  out.seedVersion = SEED_VERSION;
+  return out;
 }
 
 let saveTimer = null;
@@ -86,8 +108,9 @@ export function requestPersistence() {
 export function sampleProgramme(exercises) {
   const id = (name) => exercises.find((e) => e.name === name)?.id;
   const ex = (name, sets, repsMin, repsMax, rest = 120, increment = 2.5) => ({
-    id: uid(), exerciseId: id(name), sets, repsMin, repsMax, rest, increment,
+    id: uid(), exerciseId: id(name), sets, repsMin, repsMax, rest, increment, mode: 'reps', duration: 30,
   });
+  const timed = (name, sets, duration) => ({ ...ex(name, sets, 1, 1, 60, 0), mode: 'time', duration });
   return {
     id: uid(),
     name: 'Upper / Lower (sample)',
@@ -111,8 +134,11 @@ export function sampleProgramme(exercises) {
       { id: uid(), name: 'Lower B', exercises: [
         ex('Deadlift', 3, 3, 6, 180, 5), ex('Front Squat', 3, 6, 10, 150),
         ex('Bulgarian Split Squat', 3, 8, 12, 90, 2), ex('Leg Extension', 3, 10, 15, 60),
-        ex('Hanging Leg Raise', 3, 10, 15, 60, 0),
-      ] },
+        // Finisher circuit: 3 rounds, 15s between exercises, 60s between rounds.
+        { ...ex('Push-up', 3, 10, 15, 60, 0), group: 'fin' }, { ...ex('Walking Lunge', 3, 10, 12, 60, 0), group: 'fin' },
+        { ...timed('Plank', 3, 40), group: 'fin' }, { ...timed('Mountain Climber', 3, 30), group: 'fin' },
+      ],
+      groups: { fin: { type: 'circuit', name: 'Finisher', rounds: 3, transition: 15, roundRest: 60 } } },
     ],
   };
 }

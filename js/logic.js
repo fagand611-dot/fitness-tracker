@@ -86,8 +86,11 @@ export function e1rm(weight, reps) {
   return weight * (1 + reps / 30);
 }
 
+// A set counts once it's ticked and has reps or (for timed exercises) seconds.
 export const doneSets = (ex) =>
-  (ex?.sets || []).filter((s) => s.done && Number(s.reps) > 0);
+  (ex?.sets || []).filter((s) => s.done && (Number(s.reps) > 0 || Number(s.time) > 0));
+
+export const isTimed = (target) => target?.mode === 'time';
 
 export function setVolume(s) {
   return (Number(s.weight) || 0) * (Number(s.reps) || 0);
@@ -124,14 +127,15 @@ export function exerciseHistory(sessions, exerciseId) {
     if (!ex) continue;
     const sets = doneSets(ex);
     if (!sets.length) continue;
-    let best = 0, top = 0, vol = 0, bestSet = null;
+    let best = 0, top = 0, vol = 0, bestSet = null, maxTime = 0;
     for (const st of sets) {
+      maxTime = Math.max(maxTime, Number(st.time) || 0);
       const e = e1rm(st.weight, st.reps);
       if (e > best) { best = e; bestSet = st; }
       top = Math.max(top, Number(st.weight) || 0);
       vol += setVolume(st);
     }
-    out.push({ date: s.date, sessionId: s.id, e1rm: best, topWeight: top, volume: vol, bestSet, sets });
+    out.push({ date: s.date, sessionId: s.id, e1rm: best, topWeight: top, volume: vol, maxTime, bestSet, sets });
   }
   return out;
 }
@@ -140,7 +144,7 @@ export function personalRecords(sessions, exerciseId) {
   const hist = exerciseHistory(sessions, exerciseId);
   if (!hist.length) return null;
   const by = (k) => hist.reduce((a, b) => (b[k] > a[k] ? b : a));
-  return { e1rm: by('e1rm'), topWeight: by('topWeight'), volume: by('volume') };
+  return { e1rm: by('e1rm'), topWeight: by('topWeight'), volume: by('volume'), maxTime: by('maxTime') };
 }
 
 /** PRs set in `session` compared with all *other* finished sessions before it. */
@@ -203,9 +207,16 @@ export function suggestNext(target, last) {
 
 /** Build the set rows for a new workout from a programme day entry + history. */
 export function prefillSets(target, last) {
-  const sug = suggestNext(target, last);
   const n = Number(target.sets) || 1;
   const prevSets = last ? doneSets(last) : [];
+  if (isTimed(target)) {
+    const time = Number(target.duration) || 30;
+    const rows = Array.from({ length: n }, (_, i) => ({ weight: prevSets[i]?.weight ?? prevSets[0]?.weight ?? '', time, done: false }));
+    const lastBest = Math.max(0, ...prevSets.map((s) => Number(s.time) || 0));
+    const message = lastBest ? `${time}s work · last time up to ${lastBest}s` : `${time}s work`;
+    return { sets: rows, suggestion: { kind: 'timed', weight: rows[0].weight, time, message } };
+  }
+  const sug = suggestNext(target, last);
   const rows = [];
   for (let i = 0; i < n; i++) {
     let weight = sug.weight;
@@ -239,38 +250,46 @@ export function sessionsToCSV(data) {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const rows = [['date', 'programme', 'day', 'exercise', 'set', 'weight', 'reps', 'e1rm', 'notes']];
+  const rows = [['date', 'programme', 'day', 'exercise', 'set', 'weight', 'reps', 'seconds', 'e1rm', 'notes']];
   for (const s of finished(data.sessions)) {
     const p = prog[s.programmeId];
     const day = p?.days.find((d) => d.id === s.dayId);
     for (const ex of s.exercises) {
       doneSets(ex).forEach((st, i) => {
-        rows.push([s.date, p?.name || '', day?.name || s.name || '', exName[ex.exerciseId] || '', i + 1, st.weight, st.reps, fmtNum(roundTo(e1rm(st.weight, st.reps), 0.1)), ex.notes || '']);
+        const est = e1rm(st.weight, st.reps);
+        rows.push([s.date, p?.name || '', day?.name || s.name || '', exName[ex.exerciseId] || '', i + 1, st.weight ?? '', st.reps ?? '', st.time ?? '', est ? fmtNum(roundTo(est, 0.1)) : '', ex.notes || '']);
       });
     }
   }
   return rows.map((r) => r.map(esc).join(',')).join('\n');
 }
 
-// ---------- Supersets ----------
-// An exercise belongs to a superset when it shares a `group` id with its
-// neighbour(s). Only *consecutive* items with the same group are linked.
+// ---------- Supersets & circuits ----------
+// Exercises are grouped by sharing a `group` id with their neighbours. Only
+// *consecutive* items are linked. A group can have settings in a `meta` map
+// ({[groupId]: {type:'circuit', rounds, transition, roundRest, name}}); groups
+// without circuit settings are supersets.
 
-/** Split a list into blocks of consecutive items sharing a group. Returns [{group, items:[{item, index}]}]. */
-export function groupBlocks(list) {
+export const isCircuit = (meta, g) => !!g && meta?.[g]?.type === 'circuit';
+
+/** Split a list into blocks of consecutive items sharing a group. Returns [{group, circuit, items:[{item, index}]}]. */
+export function groupBlocks(list, meta = {}) {
   const blocks = [];
   list.forEach((item, index) => {
     const prev = blocks[blocks.length - 1];
     if (item.group && prev && prev.group === item.group) prev.items.push({ item, index });
     else blocks.push({ group: item.group || null, items: [{ item, index }] });
   });
-  // A "group" of one isn't a superset.
-  for (const b of blocks) if (b.items.length < 2) b.group = null;
+  for (const b of blocks) {
+    b.circuit = isCircuit(meta, b.group);
+    // A superset of one isn't a superset (a circuit of one exercise is fine).
+    if (!b.circuit && b.items.length < 2) b.group = null;
+  }
   return blocks;
 }
 
 /** Link item i with item i+1 into one superset (merging existing groups). Mutates list. */
-export function linkWithNext(list, i) {
+export function linkWithNext(list, i, meta = {}) {
   const a = list[i], b = list[i + 1];
   if (!a || !b) return list;
   const g = a.group || b.group || uid();
@@ -278,11 +297,11 @@ export function linkWithNext(list, i) {
   for (const it of list) if (old.includes(it.group)) it.group = g;
   a.group = g;
   b.group = g;
-  return normalizeGroups(list);
+  return normalizeGroups(list, meta);
 }
 
 /** Remove item i from its superset. Mutates list. */
-export function unlinkItem(list, i) {
+export function unlinkItem(list, i, meta = {}) {
   const it = list[i];
   if (!it?.group) return list;
   const g = it.group;
@@ -290,45 +309,93 @@ export function unlinkItem(list, i) {
   // Items after i in the same block become a separate group so they stay linked to each other.
   const ng = uid();
   for (let j = i + 1; j < list.length && list[j].group === g; j++) list[j].group = ng;
-  return normalizeGroups(list);
+  return normalizeGroups(list, meta);
 }
 
-/** Drop group ids that don't link at least two consecutive items. */
-export function normalizeGroups(list) {
-  for (const b of groupBlocks(list)) if (!b.group) for (const { item } of b.items) delete item.group;
+/** Drop group ids that no longer link anything (and settings of groups that no longer exist). */
+export function normalizeGroups(list, meta) {
+  for (const b of groupBlocks(list, meta)) if (!b.group) for (const { item } of b.items) delete item.group;
+  if (meta) {
+    const used = new Set(list.map((x) => x.group).filter(Boolean));
+    for (const g of Object.keys(meta)) if (!used.has(g)) delete meta[g];
+  }
+  return list;
+}
+
+/** Set every circuit member's set count to the circuit's rounds. */
+export function syncCircuitRounds(list, meta, g) {
+  const rounds = Math.max(1, Number(meta[g]?.rounds) || 1);
+  for (const it of list) {
+    if (it.group !== g) continue;
+    if (Array.isArray(it.sets)) {
+      // session exercise: grow/shrink set rows, keeping done ones
+      while (it.sets.length < rounds) it.sets.push({ ...(it.sets[it.sets.length - 1] || {}), done: false });
+      while (it.sets.length > rounds && !it.sets[it.sets.length - 1].done) it.sets.pop();
+    } else {
+      it.sets = rounds;
+    }
+  }
   return list;
 }
 
 /**
  * Order in which sets should be performed: normal exercises set by set,
- * supersets alternate (A1, B1, A2, B2, ...). Returns [[exerciseIndex, setIndex], ...].
+ * supersets and circuits go round by round (A1, B1, C1, A2, B2, ...).
+ * Returns [[exerciseIndex, setIndex], ...].
  */
-export function setOrder(exercises) {
+export function setOrder(exercises, meta = {}) {
   const out = [];
-  for (const b of groupBlocks(exercises)) {
-    const rounds = Math.max(...b.items.map(({ item }) => item.sets.length));
+  for (const b of groupBlocks(exercises, meta)) {
     if (!b.group) {
       const { item, index } = b.items[0];
       item.sets.forEach((_, s) => out.push([index, s]));
       continue;
     }
+    const rounds = Math.max(...b.items.map(({ item }) => item.sets.length));
     for (let r = 0; r < rounds; r++) for (const { item, index } of b.items) if (r < item.sets.length) out.push([index, r]);
   }
   return out;
 }
 
 /** The [exerciseIndex, setIndex] of the next set to do, or null when all done. */
-export function nextSet(exercises) {
-  return setOrder(exercises).find(([e, s]) => !exercises[e].sets[s].done) || null;
+export function nextSet(exercises, meta = {}) {
+  return setOrder(exercises, meta).find(([e, s]) => !exercises[e].sets[s].done) || null;
 }
 
 /**
- * After ticking set `s` of exercise `e`, should the rest timer start?
- * In a superset only after the last exercise of the round that still has sets.
+ * Seconds of rest after finishing set `s` of exercise `e`.
+ * - normal exercise: its own rest
+ * - superset: 0 until the last exercise of the round, then that exercise's rest
+ * - circuit: `transition` between exercises, `roundRest` between rounds, 0 after the final round
  */
-export function shouldRestAfter(exercises, e, s) {
-  const block = groupBlocks(exercises).find((b) => b.items.some((x) => x.index === e));
-  if (!block?.group) return true;
-  const laterInRound = block.items.filter((x) => x.index > e && x.item.sets.length > s);
-  return laterInRound.length === 0;
+export function restAfter(exercises, meta, e, s, fallback = 0) {
+  const ownRest = Number(exercises[e]?.target?.rest ?? exercises[e]?.rest) || fallback;
+  const block = groupBlocks(exercises, meta).find((b) => b.items.some((x) => x.index === e));
+  if (!block?.group) return ownRest;
+  const laterInRound = block.items.some((x) => x.index > e && x.item.sets.length > s);
+  if (!block.circuit) return laterInRound ? 0 : ownRest;
+  const c = meta[block.group];
+  if (laterInRound) return Number(c.transition) || 0;
+  const moreRounds = block.items.some((x) => x.item.sets.length > s + 1);
+  return moreRounds ? Number(c.roundRest) || 0 : 0;
+}
+
+/** Back-compat helper: does any rest follow this set? */
+export function shouldRestAfter(exercises, e, s, meta = {}) {
+  return restAfter(exercises, meta, e, s, 1) > 0;
+}
+
+/**
+ * Move item i one step (dir = -1/+1). A neighbouring superset/circuit is jumped
+ * over as a whole so groups are never split. Returns the new index.
+ */
+export function moveItem(list, i, dir) {
+  const it = list[i];
+  let j = i + dir;
+  if (!it || j < 0 || j >= list.length) return i;
+  const g = list[j].group;
+  if (g && g !== it.group) while (j + dir >= 0 && j + dir < list.length && list[j + dir].group === g) j += dir;
+  list.splice(i, 1);
+  list.splice(j, 0, it);
+  return j;
 }

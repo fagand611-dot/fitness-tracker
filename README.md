@@ -22,8 +22,14 @@ device, with JSON backup and CSV export.
 - **Supersets**: link consecutive exercises in the programme editor (or
   mid-workout). Sets alternate A1 → B1 → A2 …, the next set is highlighted, and
   rest starts only after each round.
+- **Circuits**: add a circuit block to any workout day, e.g. six exercises one
+  after another, with a short rest between exercises and a longer rest between
+  rounds. Each exercise is measured in reps or time (e.g. 40s plank). A guided
+  full-screen player walks you through it with 3-2-1 countdown beeps: rep
+  exercises get a big **Done** button, timed ones count down and move on
+  automatically, and you can pause, skip or exit and resume later.
 - **Rest timer**: starts automatically when you tick a set, with −15 / +15 /
-  skip. It beeps, and vibrates on Android.
+  skip. It counts down with 3-2-1 beeps, and vibrates on Android.
 - **Progression hints** (double progression): when you hit the top of the rep
   range on every set, the app suggests adding weight. Otherwise it suggests a rep
   target.

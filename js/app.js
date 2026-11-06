@@ -52,9 +52,24 @@ const entryLabel = (e) => dayOf(e.programmeId, e.dayId)?.name || 'Workout';
 const fmtW = (w) => `${L.fmtNum(w)} ${unit()}`;
 const fmtDate = (iso, opts = { weekday: 'short', day: 'numeric', month: 'short' }) =>
   L.parseISO(iso).toLocaleDateString(undefined, opts);
-const fmtRest = (s) => (s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${s}s`);
-const targetText = (t) => `${t.sets} × ${t.repsMin === t.repsMax ? t.repsMin : `${t.repsMin}–${t.repsMax}`} · ${fmtRest(t.rest)} rest`;
-const setsSummary = (sets) => sets.map((s) => `${L.fmtNum(s.weight)}×${s.reps}`).join(' · ');
+const fmtRest = (s) => (s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : s ? `${s}s` : 'no rest');
+const repsText = (t) => (t.repsMin === t.repsMax ? `${t.repsMin}` : `${t.repsMin}–${t.repsMax}`);
+const workText = (t) => (L.isTimed(t) ? `${t.duration || 30}s` : `${repsText(t)} reps`);
+const targetText = (t, inCircuit = false) => inCircuit
+  ? workText(t)
+  : `${t.sets} × ${L.isTimed(t) ? `${t.duration || 30}s` : repsText(t)} · ${fmtRest(t.rest)} rest`;
+const fmtSet = (s) => (Number(s.time) > 0
+  ? (Number(s.weight) ? `${L.fmtNum(s.weight)}×${s.time}s` : `${s.time}s`)
+  : `${L.fmtNum(s.weight)}×${s.reps}`);
+const setsSummary = (sets) => sets.map(fmtSet).join(' · ');
+const circuitText = (c) => `${c.rounds} round${c.rounds == 1 ? '' : 's'} · ${fmtRest(c.transition)} between exercises · ${fmtRest(c.roundRest)} between rounds`;
+const metaOf = (o) => (o.groups ||= {});
+function newTarget(exId, extra = {}) {
+  return {
+    id: L.uid(), exerciseId: exId, sets: 3, repsMin: 8, repsMax: 12, rest: data.settings.defaultRest,
+    increment: data.settings.increment, notes: '', mode: exById(exId)?.timed ? 'time' : 'reps', duration: 30, ...extra,
+  };
+}
 
 function commit(rerender = true) {
   save(data);
@@ -115,46 +130,56 @@ function topbar(title, { back, action } = {}) {
 // =====================================================================
 // Rest timer
 // =====================================================================
-const timer = { endsAt: 0, total: 0, beeped: false };
+const timer = { endsAt: 0, total: 0, cue: null };
 const $timer = document.getElementById('timer');
 let audioCtx = null;
+
+function ensureAudio() {
+  // Must be called from a tap: browsers (iOS especially) only allow audio unlocked by a user gesture.
+  if (data.settings.sound && !audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  }
+  audioCtx?.resume?.();
+}
+function tone(freq, dur) {
+  if (!data.settings.sound || !audioCtx) return;
+  try {
+    const t0 = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.4, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t0);
+    o.stop(t0 + dur + 0.02);
+  } catch {}
+}
+const cueTick = () => { tone(660, 0.12); navigator.vibrate?.(60); };
+const cueGo = () => { tone(990, 0.5); navigator.vibrate?.([300, 100, 300]); };
+// Call every tick with seconds left; plays 3-2-1 then GO exactly once each. `state` remembers what played.
+function countdownCues(state, left) {
+  const sec = Math.ceil(left);
+  if (left > 0 && sec <= 3 && state.cue !== sec) { state.cue = sec; cueTick(); }
+  else if (left <= 0 && state.cue !== 0) { state.cue = 0; cueGo(); }
+}
 
 function startRest(sec) {
   if (!sec) return;
   timer.total = sec;
   timer.endsAt = Date.now() + sec * 1000;
-  timer.beeped = false;
-  // Unlock audio on a user gesture so we can beep later (iOS needs this).
-  if (data.settings.sound && !audioCtx) {
-    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
-  }
-  audioCtx?.resume?.();
+  timer.cue = null;
+  ensureAudio();
   tick();
 }
 function stopRest() {
   timer.endsAt = 0;
   tick();
 }
-function beep() {
-  navigator.vibrate?.([250, 120, 250, 120, 250]);
-  if (!data.settings.sound || !audioCtx) return;
-  try {
-    const t0 = audioCtx.currentTime;
-    [0, 0.25, 0.5].forEach((d) => {
-      const o = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      o.frequency.value = 880;
-      g.gain.setValueAtTime(0.0001, t0 + d);
-      g.gain.exponentialRampToValueAtTime(0.4, t0 + d + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + d + 0.18);
-      o.connect(g).connect(audioCtx.destination);
-      o.start(t0 + d);
-      o.stop(t0 + d + 0.2);
-    });
-  } catch {}
-}
 function tick() {
   // Elapsed workout clocks
+  if (!timer.endsAt) playerTick();
   document.querySelectorAll('.elapsed[data-start]').forEach((el) => {
     el.textContent = L.fmtDuration((Date.now() - Date.parse(el.dataset.start)) / 1000);
   });
@@ -163,11 +188,10 @@ function tick() {
     document.body.classList.remove('timer-on');
     return;
   }
+  playerTick();
+  if (player) { $timer.hidden = true; return; } // the circuit player shows its own rests
   const left = (timer.endsAt - Date.now()) / 1000;
-  if (left <= 0 && !timer.beeped) {
-    timer.beeped = true;
-    beep();
-  }
+  if (left > -1) countdownCues(timer, left);
   if (left < -30) return stopRest(); // auto-hide 30s after finishing
   $timer.hidden = false;
   document.body.classList.add('timer-on');
@@ -191,7 +215,7 @@ $timer.addEventListener('click', (e) => {
   if (a === 'x') return stopRest();
   timer.endsAt += Number(a) * 1000;
   timer.total = Math.max(timer.total, (timer.endsAt - Date.now()) / 1000);
-  timer.beeped = timer.endsAt <= Date.now();
+  if (timer.endsAt > Date.now() + 3000) timer.cue = null;
   tick();
 });
 setInterval(tick, 250);
@@ -224,7 +248,7 @@ function makeSessionExercise(t) {
   return {
     id: L.uid(),
     exerciseId: t.exerciseId,
-    target: { sets: t.sets, repsMin: t.repsMin, repsMax: t.repsMax, rest: t.rest, increment: t.increment },
+    target: { sets: t.sets, repsMin: t.repsMin, repsMax: t.repsMax, rest: t.rest, increment: t.increment, mode: t.mode || 'reps', duration: t.duration || 30 },
     sets,
     suggestion,
     notes: t.notes || '',
@@ -250,7 +274,9 @@ function startWorkout({ programmeId = null, dayId = null, scheduleId = null } = 
     startedAt: new Date().toISOString(),
     finishedAt: null,
     exercises: (day?.exercises || []).filter((t) => exById(t.exerciseId)).map(makeSessionExercise),
+    groups: JSON.parse(JSON.stringify(day?.groups || {})),
   };
+  L.normalizeGroups(s.exercises, s.groups);
   data.sessions.push(s);
   data.activeSessionId = s.id;
   flush(data);
@@ -260,7 +286,7 @@ function startWorkout({ programmeId = null, dayId = null, scheduleId = null } = 
 
 function finishWorkout(s) {
   const done = s.exercises.reduce((n, e) => n + L.doneSets(e).length, 0);
-  const pending = s.exercises.reduce((n, e) => n + e.sets.filter((x) => !x.done && Number(x.reps) > 0 && x.weight !== '').length, 0);
+  const pending = s.exercises.reduce((n, e) => n + e.sets.filter((x) => !x.done && (Number(x.reps) > 0 || Number(x.time) > 0) && x.weight !== '').length, 0);
   if (!done) {
     if (confirm('No sets ticked off yet. Discard this workout?')) discardWorkout(s);
     return;
@@ -269,8 +295,10 @@ function finishWorkout(s) {
   // Drop unticked sets and empty exercises.
   s.exercises.forEach((e) => (e.sets = e.sets.filter((x) => x.done)));
   s.exercises = s.exercises.filter((e) => e.sets.length);
+  L.normalizeGroups(s.exercises, s.groups);
   s.finishedAt = new Date().toISOString();
   data.activeSessionId = null;
+  closePlayer();
   stopRest();
   flush(data);
   const prs = L.detectPRs(data.sessions, s);
@@ -319,9 +347,11 @@ function viewWorkout(id) {
         ? h('input', { class: 'input', type: 'date', value: s.date, style: 'max-width:180px', onchange: (e) => { if (e.target.value) { s.date = e.target.value; commit(false); } } })
         : h('span', {}, fmtDate(s.date))));
 
-  const next = editing ? null : L.nextSet(s.exercises);
-  const cards = L.groupBlocks(s.exercises).map((b, bi, all) => {
+  const meta = metaOf(s);
+  const next = editing ? null : L.nextSet(s.exercises, meta);
+  const cards = L.groupBlocks(s.exercises, meta).map((b, bi, all) => {
     const inner = b.items.map(({ item, index }) => exerciseCard(s, item, index, next));
+    if (b.circuit) return circuitWrap(s, b, inner);
     if (!b.group) return inner;
     return supersetWrap(supersetLetter(all, bi), b.items.map(({ item }) => exName(item.exerciseId)), inner);
   });
@@ -331,11 +361,13 @@ function viewWorkout(id) {
     head,
     cards,
     !s.exercises.length ? h('div', { class: 'empty' }, 'No exercises yet. Add one below.') : null,
-    h('button', { class: 'btn block', onclick: () => pickExercise((exId) => {
-      s.exercises.push(makeSessionExercise({ exerciseId: exId, sets: 3, repsMin: 8, repsMax: 12, rest: data.settings.defaultRest, increment: data.settings.increment }));
-      closeSheet();
-      commit();
-    }) }, '+ Add exercise'),
+    h('div', { class: 'btn-row' },
+      h('button', { class: 'btn', onclick: () => pickExercise((exId) => {
+        s.exercises.push(makeSessionExercise(newTarget(exId)));
+        closeSheet();
+        commit();
+      }) }, '+ Add exercise'),
+      h('button', { class: 'btn', onclick: () => addCircuit(s.exercises, meta, (ids, g) => ids.map((id) => ({ ...makeSessionExercise(newTarget(id, { sets: meta[g].rounds, repsMin: 10, repsMax: 15 })), group: g }))) }, '+ Add circuit')),
     h('div', { class: 'btn-row' },
       editing
         ? [h('button', { class: 'btn danger', onclick: () => { if (confirm('Delete this workout from your history?')) { data.sessions = data.sessions.filter((x) => x.id !== s.id); flush(data); location.hash = '#/calendar'; } } }, 'Delete'),
@@ -350,36 +382,46 @@ function exerciseCard(s, ex, idx, next) {
   const prevSets = last ? L.doneSets(last.exercise) : [];
   const t = ex.target;
   const sug = ex.suggestion;
+  const meta = metaOf(s);
+  const inCircuit = L.isCircuit(meta, ex.group);
+  const timed = L.isTimed(t);
 
   const rows = ex.sets.map((st, i) => {
     const isNext = next && next[0] === idx && next[1] === i;
     const tr = h('tr', { class: st.done ? 'done' : isNext ? 'next' : '' },
       h('td', { class: 'n' }, i + 1),
-      h('td', { class: 'prev' }, prevSets[i] ? `${L.fmtNum(prevSets[i].weight)}×${prevSets[i].reps}` : '–'),
+      h('td', { class: 'prev' }, prevSets[i] ? fmtSet(prevSets[i]) : '–'),
       h('td', {}, h('input', {
         type: 'number', inputmode: 'decimal', step: 'any', value: st.weight === '' ? '' : L.fmtNum(st.weight), placeholder: unit(), 'aria-label': `Set ${i + 1} weight`,
         oninput: (e) => { st.weight = e.target.value === '' ? '' : Number(e.target.value); commit(false); },
         onfocus: (e) => e.target.select(),
       })),
-      h('td', {}, h('input', {
-        type: 'number', inputmode: 'numeric', step: '1', value: st.reps === '' ? '' : st.reps, placeholder: 'reps', 'aria-label': `Set ${i + 1} reps`,
-        oninput: (e) => { st.reps = e.target.value === '' ? '' : Number(e.target.value); commit(false); },
-        onfocus: (e) => e.target.select(),
-      })),
+      h('td', {}, timed
+        ? h('input', {
+          type: 'number', inputmode: 'numeric', step: '1', value: st.time ?? '', placeholder: 'sec', 'aria-label': `Set ${i + 1} seconds`,
+          oninput: (e) => { st.time = e.target.value === '' ? '' : Number(e.target.value); commit(false); },
+          onfocus: (e) => e.target.select(),
+        })
+        : h('input', {
+          type: 'number', inputmode: 'numeric', step: '1', value: st.reps ?? '', placeholder: 'reps', 'aria-label': `Set ${i + 1} reps`,
+          oninput: (e) => { st.reps = e.target.value === '' ? '' : Number(e.target.value); commit(false); },
+          onfocus: (e) => e.target.select(),
+        })),
       h('td', {}, h('button', {
         class: 'tick', 'aria-label': st.done ? 'Mark set not done' : 'Mark set done',
         onclick: () => {
-          if (!st.done && !(Number(st.reps) > 0)) { toast('Enter reps first'); return; }
+          if (!st.done && !(timed ? Number(st.time) > 0 : Number(st.reps) > 0)) { toast(timed ? 'Enter seconds first' : 'Enter reps first'); return; }
           if (st.weight === '') st.weight = 0;
           st.done = !st.done;
           // Carry this weight forward into later empty/untouched sets.
           if (st.done) {
             for (let j = i + 1; j < ex.sets.length; j++) if (!ex.sets[j].done && ex.sets[j].weight === '') ex.sets[j].weight = st.weight;
             if (!editing) {
-              if (L.shouldRestAfter(s.exercises, idx, i)) startRest(t.rest || data.settings.defaultRest);
+              const rest = L.restAfter(s.exercises, meta, idx, i, data.settings.defaultRest);
+              if (rest > 0) startRest(rest);
               else {
-                const n = L.nextSet(s.exercises);
-                if (n) toast(`Superset: straight to ${exName(s.exercises[n[0]].exerciseId)}`, 1600);
+                const n = L.nextSet(s.exercises, meta);
+                if (n && ex.group) toast(`Straight to ${exName(s.exercises[n[0]].exerciseId)}`, 1600);
               }
             }
           }
@@ -393,28 +435,30 @@ function exerciseCard(s, ex, idx, next) {
     h('div', { class: 'ex-head' },
       h('div', { class: 'grow' },
         h('h3', { class: 'ex-name' }, exName(ex.exerciseId)),
-        h('div', { class: 'small muted' }, targetText(t))),
+        h('div', { class: 'small muted' }, targetText(t, inCircuit))),
       h('button', { class: 'icon-btn', 'aria-label': 'Exercise options', onclick: () => exerciseMenu(s, ex, idx) }, '⋯')),
     !editing && sug ? h('div', { class: `hint ${sug.kind}` }, sug.kind === 'increase' ? '▲ ' : '', sug.message) : null,
     ex.notes ? h('div', { class: 'small muted', style: 'margin-top:6px' }, '📝 ', ex.notes) : null,
     h('table', { class: 'sets' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Set'), h('th', {}, 'Last'), h('th', {}, unit()), h('th', {}, 'Reps'), h('th', {}, ''))),
+      h('thead', {}, h('tr', {}, h('th', {}, inCircuit ? 'Rnd' : 'Set'), h('th', {}, 'Last'), h('th', {}, unit()), h('th', {}, timed ? 'Sec' : 'Reps'), h('th', {}, ''))),
       h('tbody', {}, rows)),
-    h('div', { class: 'row', style: 'margin-top:6px' },
+    inCircuit ? null : h('div', { class: 'row', style: 'margin-top:6px' },
       h('button', { class: 'btn ghost sm', onclick: () => {
         const lastSet = ex.sets[ex.sets.length - 1];
-        ex.sets.push({ weight: lastSet ? lastSet.weight : '', reps: lastSet ? lastSet.reps : t.repsMin, done: false });
+        ex.sets.push(timed
+          ? { weight: lastSet ? lastSet.weight : '', time: lastSet ? lastSet.time : t.duration, done: false }
+          : { weight: lastSet ? lastSet.weight : '', reps: lastSet ? lastSet.reps : t.repsMin, done: false });
         commit();
       } }, '+ Add set'),
       ex.sets.length ? h('button', { class: 'btn ghost sm', style: 'color:var(--muted)', onclick: () => { ex.sets.pop(); commit(); } }, '− Remove set') : null));
 }
 
 function exerciseMenu(s, ex, idx) {
+  const meta = metaOf(s);
+  const list = s.exercises;
   const move = (d) => {
-    const j = idx + d;
-    if (j < 0 || j >= s.exercises.length) return;
-    [s.exercises[idx], s.exercises[j]] = [s.exercises[j], s.exercises[idx]];
-    L.normalizeGroups(s.exercises);
+    L.moveItem(list, idx, d);
+    L.normalizeGroups(list, meta);
     closeSheet();
     commit();
   };
@@ -423,9 +467,10 @@ function exerciseMenu(s, ex, idx) {
     field('Notes', notes),
     h('button', { class: 'btn primary block', onclick: () => { ex.notes = notes.value.trim(); closeSheet(); commit(); } }, 'Save notes'),
     h('div', { class: 'btn-row' },
-      h('button', { class: 'btn', onclick: () => move(-1), disabled: idx === 0 }, '↑ Move up'),
-      h('button', { class: 'btn', onclick: () => move(1), disabled: idx === s.exercises.length - 1 }, '↓ Move down')),
-    supersetButtons(s.exercises, idx, () => { closeSheet(); commit(); }),
+      h('button', { class: 'btn', onclick: () => move(-1), disabled: !canMove(list, meta, idx, -1) }, '↑ Move up'),
+      h('button', { class: 'btn', onclick: () => move(1), disabled: !canMove(list, meta, idx, 1) }, '↓ Move down')),
+    supersetButtons(list, idx, () => { closeSheet(); commit(); }, meta),
+    L.isCircuit(meta, ex.group) ? h('button', { class: 'btn block', style: 'margin-top:8px', onclick: () => circuitSheet(list, meta, ex.group, () => { closeSheet(); commit(); }) }, '⟳ Circuit settings') : null,
     h('div', { class: 'btn-row' },
       h('button', { class: 'btn', onclick: () => pickExercise((id) => {
         ex.exerciseId = id;
@@ -436,14 +481,14 @@ function exerciseMenu(s, ex, idx) {
         closeSheet();
         commit();
       }) }, '⇄ Swap exercise'),
-      h('button', { class: 'btn danger', onclick: () => { if (confirm('Remove this exercise from the workout?')) { s.exercises.splice(idx, 1); L.normalizeGroups(s.exercises); closeSheet(); commit(); } } }, 'Remove')));
+      h('button', { class: 'btn danger', onclick: () => { if (confirm('Remove this exercise from the workout?')) { s.exercises.splice(idx, 1); L.normalizeGroups(s.exercises, meta); closeSheet(); commit(); } } }, 'Remove')));
 }
 
 // =====================================================================
 // Supersets (shared by programme editor and workout)
 // =====================================================================
 function supersetLetter(blocks, bi) {
-  const n = blocks.slice(0, bi + 1).filter((b) => b.group).length;
+  const n = blocks.slice(0, bi + 1).filter((b) => b.group && !b.circuit).length;
   return String.fromCharCode(64 + n);
 }
 
@@ -453,23 +498,309 @@ function supersetWrap(letter, names, inner) {
     inner);
 }
 
-function supersetButtons(list, i, done) {
+function supersetButtons(list, i, done, meta = {}) {
   const it = list[i];
-  const inSuperset = L.groupBlocks(list).some((b) => b.group && b.items.some((x) => x.index === i));
+  // Circuits manage their own grouping.
+  if (L.isCircuit(meta, it.group)) return null;
+  const inSuperset = L.groupBlocks(list, meta).some((b) => b.group && b.items.some((x) => x.index === i));
   const nextLinked = inSuperset && list[i + 1] && list[i + 1].group === it.group;
+  const nextFree = list[i + 1] && !L.isCircuit(meta, list[i + 1].group);
   return h('div', { class: 'btn-row' },
-    list[i + 1] && !nextLinked
-      ? h('button', { class: 'btn', onclick: () => { L.linkWithNext(list, i); done(); } }, `⛓ Superset with ${exName(list[i + 1].exerciseId)}`)
+    nextFree && !nextLinked
+      ? h('button', { class: 'btn', onclick: () => { L.linkWithNext(list, i, meta); done(); } }, `⛓ Superset with ${exName(list[i + 1].exerciseId)}`)
       : null,
-    inSuperset ? h('button', { class: 'btn', onclick: () => { L.unlinkItem(list, i); done(); } }, 'Remove from superset') : null);
+    inSuperset ? h('button', { class: 'btn', onclick: () => { L.unlinkItem(list, i, meta); done(); } }, 'Remove from superset') : null);
+}
+
+// Circuit members can only move within their circuit; other items jump over groups.
+function canMove(list, meta, i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return false;
+  const g = list[i].group;
+  return !L.isCircuit(meta, g) || list[j].group === g;
+}
+
+function circuitWrap(s, b, inner) {
+  const c = s.groups[b.group];
+  const editing = !!s.finishedAt;
+  const sets = b.items.flatMap(({ item }) => item.sets);
+  const doneN = sets.filter((x) => x.done).length;
+  return h('div', { class: 'circuit' },
+    h('div', { class: 'circuit-head' },
+      h('div', { class: 'grow' },
+        h('div', { class: 'circuit-label' }, '⟳ Circuit', c.name && c.name !== 'Circuit' ? ` · ${c.name}` : ''),
+        h('div', { class: 'small muted' }, `${b.items.length} exercises · ${circuitText(c)}`)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Circuit settings', onclick: () => circuitSheet(s.exercises, s.groups, b.group, () => { closeSheet(); commit(); }) }, '⚙')),
+    !editing && doneN < sets.length
+      ? h('button', { class: 'btn primary big block', style: 'margin-bottom:12px', onclick: () => openPlayer(s, b.group) }, doneN ? `▶ Resume circuit (${doneN}/${sets.length} done)` : '▶ Start circuit')
+      : null,
+    inner);
+}
+
+/** Create a circuit: pick exercises (in order), then edit its settings. `make(ids, g)` builds the list items. */
+function addCircuit(list, meta, make, after) {
+  pickExercise(null, {
+    multi: true,
+    title: 'Pick circuit exercises (in order)',
+    onDone: (ids) => {
+      const g = L.uid();
+      meta[g] = { type: 'circuit', name: 'Circuit', rounds: 3, transition: 15, roundRest: 60 };
+      list.push(...make(ids, g));
+      save(data);
+      render();
+      circuitSheet(list, meta, g, () => { closeSheet(); commit(); after?.(); });
+    },
+  });
+}
+
+function circuitSheet(list, meta, g, done) {
+  const c = meta[g];
+  const draft = { ...c };
+  const restOpts = (vals, cur) => [...new Set([...vals, cur])].sort((a, b) => a - b).map((r) => h('option', { value: r, selected: r === cur }, fmtRest(r)));
+  openSheet('Circuit settings',
+    field('Name', h('input', { class: 'input', value: draft.name || '', placeholder: 'e.g. Finisher', oninput: (e) => (draft.name = e.target.value) })),
+    field('Rounds', stepper(draft.rounds, { min: 1, onChange: (v) => (draft.rounds = v || 1) })),
+    h('div', { class: 'grid-2' },
+      field('Rest between exercises', h('select', { class: 'input', onchange: (e) => (draft.transition = Number(e.target.value)) },
+        restOpts([0, 5, 10, 15, 20, 30, 45, 60, 90], draft.transition))),
+      field('Rest between rounds', h('select', { class: 'input', onchange: (e) => (draft.roundRest = Number(e.target.value)) },
+        restOpts([0, 30, 45, 60, 90, 120, 150, 180, 240, 300], draft.roundRest)))),
+    h('div', { class: 'small muted', style: 'margin:-4px 0 12px' }, 'Each exercise can be reps or timed: tap it to change.'),
+    h('button', { class: 'btn primary block big', onclick: () => {
+      Object.assign(c, draft);
+      L.syncCircuitRounds(list, meta, g);
+      done();
+    } }, 'Save'),
+    h('div', { class: 'btn-row' },
+      h('button', { class: 'btn', onclick: () => {
+        for (const it of list) if (it.group === g) delete it.group;
+        delete meta[g];
+        done();
+      } }, 'Ungroup'),
+      h('button', { class: 'btn danger', onclick: () => {
+        if (!confirm('Delete this circuit and its exercises?')) return;
+        for (let i = list.length - 1; i >= 0; i--) if (list[i].group === g) list.splice(i, 1);
+        delete meta[g];
+        done();
+      } }, 'Delete circuit')));
+}
+
+// =====================================================================
+// Guided circuit player (full screen)
+// =====================================================================
+// Phases: ready -> (lead) -> work -> rest -> work ... -> finished.
+// Timed work and all rests count down from a timestamp, so they stay correct
+// if the phone sleeps briefly. The DOM is rebuilt only on phase changes.
+let player = null;
+const $player = document.getElementById('player');
+
+const playerSession = () => player && sessionById(player.sid);
+function playerSteps() {
+  const s = playerSession();
+  return L.setOrder(s.exercises, s.groups).filter(([e]) => s.exercises[e].group === player.g);
+}
+function openPlayer(s, g) {
+  ensureAudio();
+  stopRest();
+  player = { sid: s.id, g, phase: 'ready', cur: null, endsAt: 0, total: 0, pausedLeft: null, cue: null, startedAt: Date.now(), workStart: 0 };
+  player.cur = playerSteps().find(([e, i]) => !s.exercises[e].sets[i].done) || null;
+  if (!player.cur) player.phase = 'finished';
+  document.body.classList.add('player-on');
+  $player.hidden = false;
+  drawPlayer();
+}
+function closePlayer() {
+  if (!player) return;
+  player = null;
+  $player.hidden = true;
+  $player.replaceChildren();
+  document.body.classList.remove('player-on');
+}
+function countdown(sec) {
+  player.total = sec;
+  player.endsAt = Date.now() + sec * 1000;
+  player.pausedLeft = null;
+  player.cue = null;
+}
+const playerLeft = () => player.pausedLeft ?? (player.endsAt - Date.now()) / 1000;
+const curSet = () => {
+  const s = playerSession();
+  const [e, i] = player.cur;
+  return { s, e, i, ex: s.exercises[e], st: s.exercises[e].sets[i] };
+};
+
+function startWork() {
+  const { ex, st } = curSet();
+  player.phase = 'work';
+  if (L.isTimed(ex.target)) countdown(Number(st.time) || Number(ex.target.duration) || 30);
+  else { player.endsAt = 0; player.pausedLeft = null; player.workStart = Date.now(); }
+  drawPlayer();
+}
+
+function beginFromReady() {
+  ensureAudio();
+  const { ex } = curSet();
+  if (L.isTimed(ex.target)) { player.phase = 'lead'; countdown(5); drawPlayer(); }
+  else startWork();
+}
+
+// Finish (or skip) the current set and move on.
+function advance(markDone, seconds) {
+  const { s, e, i, ex, st } = curSet();
+  if (markDone) {
+    if (L.isTimed(ex.target)) st.time = Math.max(1, Math.round(seconds ?? (Number(st.time) || ex.target.duration)));
+    if (st.weight === '' || st.weight == null) st.weight = 0;
+    st.done = true;
+  }
+  // Leave the expired countdown before anything re-renders (render() ticks the player).
+  player.phase = 'between';
+  player.endsAt = 0;
+  save(data);
+  render(); // keep the list underneath in sync
+  if (!player) return;
+  const steps = playerSteps();
+  const pos = steps.findIndex(([a, b]) => a === e && b === i);
+  const nxt = steps.slice(pos + 1).find(([a, b]) => !s.exercises[a].sets[b].done);
+  if (!nxt) { player.phase = 'finished'; player.endsAt = 0; cueGo(); drawPlayer(); return; }
+  const rest = markDone ? L.restAfter(s.exercises, s.groups, e, i) : 0;
+  player.cur = nxt;
+  if (rest > 0) { player.phase = 'rest'; countdown(rest); drawPlayer(); }
+  else startWork();
+}
+
+function playerTick() {
+  if (!player || $player.hidden) return;
+  const clock = $player.querySelector('.pl-clock');
+  if (player.phase === 'work' && !player.endsAt) {
+    // Rep-based work: count up so you can see how long the set is taking.
+    if (clock) clock.textContent = L.fmtDuration((Date.now() - player.workStart) / 1000);
+    return;
+  }
+  if (!['lead', 'work', 'rest'].includes(player.phase)) return;
+  const left = playerLeft();
+  if (player.pausedLeft == null) countdownCues(player, left);
+  if (left <= 0 && player.pausedLeft == null) {
+    if (player.phase === 'work') advance(true);
+    else startWork();
+    return;
+  }
+  if (clock) clock.textContent = L.fmtDuration(Math.ceil(Math.max(0, left)));
+  const bar = $player.querySelector('.pl-countbar > div');
+  if (bar) bar.style.width = `${Math.max(0, Math.min(1, 1 - left / player.total)) * 100}%`;
+}
+
+function drawPlayer() {
+  if (!player) return;
+  const s = playerSession();
+  if (!s) return closePlayer();
+  const c = s.groups[player.g] || { name: 'Circuit', rounds: 1 };
+  const steps = playerSteps();
+  const members = [...new Set(steps.map(([e]) => e))];
+  const doneN = steps.filter(([e, i]) => s.exercises[e].sets[i].done).length;
+  const ph = player.phase;
+  const exit = () => { closePlayer(); render(); };
+
+  const top = h('div', { class: 'pl-top' },
+    h('button', { class: 'pl-icon', 'aria-label': 'Exit circuit', onclick: exit }, '✕'),
+    h('div', { class: 'pl-title' }, c.name || 'Circuit'),
+    ['lead', 'work', 'rest'].includes(ph) && player.endsAt
+      ? h('button', { class: 'pl-icon', 'aria-label': player.pausedLeft == null ? 'Pause' : 'Resume', onclick: () => {
+        if (player.pausedLeft == null) player.pausedLeft = playerLeft();
+        else { player.endsAt = Date.now() + player.pausedLeft * 1000; player.pausedLeft = null; }
+        drawPlayer();
+      } }, player.pausedLeft == null ? '⏸' : '▶')
+      : h('span', { class: 'pl-icon' }));
+  const progress = h('div', { class: 'pl-progress' }, h('div', { style: `width:${(doneN / Math.max(1, steps.length)) * 100}%` }));
+
+  let body;
+  if (ph === 'finished') {
+    const secs = (Date.now() - player.startedAt) / 1000;
+    body = [
+      h('div', { class: 'pl-phase' }, 'Circuit complete'),
+      h('div', { class: 'pl-name' }, '🎉'),
+      h('div', { class: 'pl-target' }, `${doneN} of ${steps.length} sets · ${L.fmtDuration(secs)}`),
+      h('div', { class: 'pl-actions' }, h('button', { class: 'btn primary big block', onclick: exit }, 'Back to workout')),
+    ];
+  } else {
+    const { e, i, ex, st } = curSet();
+    const t = ex.target;
+    const timed = L.isTimed(t);
+    const k = members.indexOf(e);
+    const metaLine = `Round ${i + 1} of ${c.rounds} · Exercise ${k + 1} of ${members.length}`;
+    const pos = steps.findIndex(([a, b]) => a === e && b === i);
+    const after = steps.slice(pos + 1).find(([a, b]) => !s.exercises[a].sets[b].done);
+    const weightTxt = Number(st.weight) ? ` · ${fmtW(st.weight)}` : '';
+    const workTarget = timed ? `${Number(st.time) || t.duration}s${weightTxt}` : `${st.reps || t.repsMin} reps${weightTxt}`;
+
+    if (ph === 'ready') {
+      body = [
+        h('div', { class: 'pl-meta' }, `${members.length} exercises · ${circuitText(c)}`),
+        h('div', { class: 'pl-phase' }, doneN ? 'Resume' : 'Get ready'),
+        h('div', { class: 'pl-name' }, exName(ex.exerciseId)),
+        h('div', { class: 'pl-target' }, metaLine, ' · ', workTarget),
+        h('ol', { class: 'pl-list' }, members.map((m) => h('li', {}, exName(s.exercises[m].exerciseId), h('span', { class: 'muted' }, ` · ${workText(s.exercises[m].target)}`)))),
+        h('div', { class: 'pl-actions' }, h('button', { class: 'btn primary big block', onclick: beginFromReady }, doneN ? '▶ Continue' : '▶ Start')),
+      ];
+    } else if (ph === 'lead' || ph === 'rest') {
+      body = [
+        h('div', { class: 'pl-meta' }, metaLine),
+        h('div', { class: 'pl-phase' }, ph === 'lead' ? 'Get ready' : (i > 0 && k === 0 ? 'Round rest' : 'Rest')),
+        h('div', { class: 'pl-clock' }, L.fmtDuration(Math.ceil(playerLeft()))),
+        h('div', { class: 'pl-countbar' }, h('div')),
+        h('div', { class: 'pl-upnext' }, 'Up next'),
+        h('div', { class: 'pl-name' }, exName(ex.exerciseId)),
+        h('div', { class: 'pl-target' }, workTarget),
+        h('div', { class: 'pl-actions row' },
+          ph === 'rest' ? h('button', { class: 'btn big grow', onclick: () => { player.endsAt += 15000; if (player.pausedLeft != null) player.pausedLeft += 15; player.total += 15; player.cue = null; } }, '+15s') : null,
+          h('button', { class: 'btn primary big grow', onclick: startWork }, ph === 'rest' ? 'Skip rest ⏭' : 'Go now')),
+      ];
+    } else {
+      // work
+      body = [
+        h('div', { class: 'pl-meta' }, metaLine),
+        h('div', { class: 'pl-phase' }, 'Work'),
+        h('div', { class: 'pl-name' }, exName(ex.exerciseId)),
+        timed
+          ? [h('div', { class: 'pl-clock' }, L.fmtDuration(Math.ceil(playerLeft()))), h('div', { class: 'pl-countbar' }, h('div')),
+             Number(st.weight) ? h('div', { class: 'pl-target' }, fmtW(st.weight)) : null]
+          : [h('div', { class: 'pl-target big' }, `${repsText(t)} reps`),
+             h('div', { class: 'pl-adjust' },
+               field('Reps done', stepper(st.reps || t.repsMin, { min: 0, onChange: (v) => { st.reps = v; save(data); } })),
+               field(`Weight (${unit()})`, stepper(st.weight === '' ? 0 : st.weight, { step: Number(t.increment) || 2.5, min: 0, decimal: true, onChange: (v) => { st.weight = v; save(data); } }))),
+             h('div', { class: 'pl-clock small' }, '0:00')],
+        after ? h('div', { class: 'pl-upnext' }, 'Then: ', exName(s.exercises[after[0]].exerciseId)) : h('div', { class: 'pl-upnext' }, 'Last one!'),
+        h('div', { class: 'pl-actions row' },
+          h('button', { class: 'btn big', onclick: () => advance(false) }, 'Skip'),
+          h('button', { class: 'btn primary big grow', onclick: () => {
+            const elapsed = timed ? player.total - Math.max(0, playerLeft()) : undefined;
+            advance(true, elapsed);
+          } }, timed ? 'Done early ✓' : 'Done ✓')),
+      ];
+    }
+  }
+  $player.className = `player ph-${ph}`;
+  $player.replaceChildren();
+  append($player, [top, progress, h('div', { class: 'pl-body' }, body)]);
+  playerTick();
 }
 
 // =====================================================================
 // Exercise picker (shared)
 // =====================================================================
-function pickExercise(onPick) {
+function pickExercise(onPick, opts = {}) {
+  const multi = !!opts.multi;
+  const picked = []; // ordered ids in multi mode
   const list = h('div');
   const search = h('input', { class: 'input', type: 'search', placeholder: 'Search or create an exercise…', autocomplete: 'off' });
+  const doneBtn = multi ? h('button', { class: 'btn primary block big', disabled: true, onclick: () => opts.onDone(picked.slice()) }, 'Pick exercises') : null;
+  const choose = (id) => {
+    if (!multi) return onPick(id);
+    const k = picked.indexOf(id);
+    if (k >= 0) picked.splice(k, 1); else picked.push(id);
+    doneBtn.disabled = !picked.length;
+    doneBtn.textContent = picked.length ? `Add ${picked.length} exercise${picked.length > 1 ? 's' : ''}` : 'Pick exercises';
+    renderList();
+  };
   const renderList = () => {
     const q = search.value.trim().toLowerCase();
     const matches = data.exercises
@@ -485,18 +816,23 @@ function pickExercise(onPick) {
         const e = { id: L.uid(), name: name[0].toUpperCase() + name.slice(1), group: 'Other' };
         data.exercises.push(e);
         save(data);
-        onPick(e.id);
+        if (multi) { search.value = ''; }
+        choose(e.id);
       } }, `+ Create “${search.value.trim()}”`) : null,
       Object.keys(groups).sort().map((g) => [
         h('div', { class: 'section-title' }, g),
-        h('div', { class: 'card', style: 'padding:0 14px' }, groups[g].map((e) =>
-          h('button', { class: 'list-item', onclick: () => onPick(e.id) }, h('span', { class: 'grow' }, e.name), h('span', { class: 'chev' }, '+')))),
+        h('div', { class: 'card', style: 'padding:0 14px' }, groups[g].map((e) => {
+          const n = picked.indexOf(e.id) + 1;
+          return h('button', { class: `list-item ${n ? 'picked' : ''}`, onclick: () => choose(e.id) },
+            h('span', { class: 'grow' }, e.name, e.timed ? h('span', { class: 'muted small' }, ' · timed') : null),
+            multi && n ? h('span', { class: 'pick-n' }, n) : h('span', { class: 'chev' }, '+'));
+        })),
       ]),
       !matches.length && !q ? h('div', { class: 'empty' }, 'No exercises') : null]);
   };
   search.addEventListener('input', renderList);
   renderList();
-  openSheet('Choose exercise', h('div', { class: 'search' }, search), list);
+  openSheet(opts.title || 'Choose exercise', h('div', { class: 'search' }, search), list, multi ? h('div', { class: 'sheet-footer' }, doneBtn) : null);
 }
 
 // =====================================================================
@@ -800,24 +1136,48 @@ function viewProgrammeEdit(id) {
   const p = progById(id);
   if (!p) { location.hash = '#/programmes'; return h('div'); }
 
-  const dayCard = (d, di) => h('div', { class: 'card' },
-    h('div', { class: 'row' },
-      h('input', { class: 'input title-input grow', value: d.name, 'aria-label': 'Day name', oninput: (e) => { d.name = e.target.value; commit(false); } }),
-      h('button', { class: 'icon-btn', 'aria-label': 'Day options', onclick: () => dayMenu(p, d, di) }, '⋯')),
-    d.exercises.length ? h('div', {}, L.groupBlocks(d.exercises).map((b, bi, all) => {
-      const rows = b.items.map(({ item: t, index: ti }) => h('button', { class: 'list-item', onclick: () => editTarget(p, d, ti) },
-        h('span', { class: 'muted small', style: 'width:18px' }, ti + 1),
-        h('div', { class: 'grow' }, h('div', {}, exName(t.exerciseId)), h('div', { class: 'small muted' }, targetText(t))),
-        h('span', { class: 'chev' }, '›')));
-      return b.group ? h('div', { class: 'superset compact' }, h('div', { class: 'superset-label' }, `Superset ${supersetLetter(all, bi)}`), rows) : rows;
-    }))
-      : h('div', { class: 'small muted', style: 'padding:6px 0' }, 'No exercises yet.'),
-    h('button', { class: 'btn ghost sm', style: 'margin-top:4px', onclick: () => pickExercise((exId) => {
-      d.exercises.push({ id: L.uid(), exerciseId: exId, sets: 3, repsMin: 8, repsMax: 12, rest: data.settings.defaultRest, increment: data.settings.increment, notes: '' });
-      save(data);
-      editTarget(p, d, d.exercises.length - 1);
-      render();
-    }) }, '+ Add exercise'));
+  const dayCard = (d, di) => {
+    const meta = metaOf(d);
+    const circuitItems = (ids, g) => ids.map((id) => newTarget(id, { group: g, sets: meta[g].rounds, repsMin: 10, repsMax: 15 }));
+    return h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('input', { class: 'input title-input grow', value: d.name, 'aria-label': 'Day name', oninput: (e) => { d.name = e.target.value; commit(false); } }),
+        h('button', { class: 'icon-btn', 'aria-label': 'Day options', onclick: () => dayMenu(p, d, di) }, '⋯')),
+      d.exercises.length ? h('div', {}, L.groupBlocks(d.exercises, meta).map((b, bi, all) => {
+        const rows = b.items.map(({ item: t, index: ti }) => h('button', { class: 'list-item', onclick: () => editTarget(p, d, ti) },
+          h('span', { class: 'muted small', style: 'width:18px' }, ti + 1),
+          h('div', { class: 'grow' }, h('div', {}, exName(t.exerciseId)), h('div', { class: 'small muted' }, targetText(t, b.circuit))),
+          h('span', { class: 'chev' }, '›')));
+        if (b.circuit) {
+          const c = meta[b.group];
+          return h('div', { class: 'circuit compact' },
+            h('div', { class: 'circuit-head' },
+              h('div', { class: 'grow' },
+                h('div', { class: 'circuit-label' }, '⟳ Circuit', c.name && c.name !== 'Circuit' ? ` · ${c.name}` : ''),
+                h('div', { class: 'small muted' }, circuitText(c))),
+              h('button', { class: 'icon-btn', 'aria-label': 'Circuit settings', onclick: () => circuitSheet(d.exercises, meta, b.group, () => { closeSheet(); commit(); }) }, '⚙')),
+            rows,
+            h('button', { class: 'btn ghost sm', onclick: () => pickExercise(null, {
+              multi: true, title: 'Add to circuit',
+              onDone: (ids) => {
+                const lastIdx = b.items[b.items.length - 1].index;
+                d.exercises.splice(lastIdx + 1, 0, ...circuitItems(ids, b.group));
+                closeSheet(); commit();
+              },
+            }) }, '+ Add to circuit'));
+        }
+        return b.group ? h('div', { class: 'superset compact' }, h('div', { class: 'superset-label' }, `Superset ${supersetLetter(all, bi)}`), rows) : rows;
+      }))
+        : h('div', { class: 'small muted', style: 'padding:6px 0' }, 'No exercises yet.'),
+      h('div', { class: 'row', style: 'margin-top:4px' },
+        h('button', { class: 'btn ghost sm', onclick: () => pickExercise((exId) => {
+          d.exercises.push(newTarget(exId));
+          save(data);
+          editTarget(p, d, d.exercises.length - 1);
+          render();
+        }) }, '+ Add exercise'),
+        h('button', { class: 'btn ghost sm', onclick: () => addCircuit(d.exercises, meta, circuitItems) }, '+ Add circuit')));
+  };
 
   return h('div', {},
     topbar('Edit programme', { back: '#/programmes' }),
@@ -883,38 +1243,47 @@ function dayMenu(p, d, di) {
 }
 
 function editTarget(p, d, ti) {
-  const t = d.exercises[ti];
-  const draft = { ...t };
+  const list = d.exercises;
+  const meta = metaOf(d);
+  const t = list[ti];
+  const inCircuit = L.isCircuit(meta, t.group);
+  const draft = { mode: 'reps', duration: 30, ...t };
   const restOpts = [30, 45, 60, 75, 90, 120, 150, 180, 240, 300];
   if (!restOpts.includes(draft.rest)) restOpts.push(draft.rest), restOpts.sort((a, b) => a - b);
   const move = (dir) => {
-    const j = ti + dir;
-    if (j < 0 || j >= d.exercises.length) return;
-    [d.exercises[ti], d.exercises[j]] = [d.exercises[j], d.exercises[ti]];
-    L.normalizeGroups(d.exercises);
+    L.moveItem(list, ti, dir);
+    L.normalizeGroups(list, meta);
     closeSheet(); commit();
   };
-  openSheet(exName(t.exerciseId),
-    h('div', { class: 'grid-2' },
+  const draw = () => openSheet(exName(t.exerciseId),
+    inCircuit ? h('div', { class: 'hint' }, `Part of a circuit: ${circuitText(meta[t.group])}.`) : null,
+    field('Measure by', seg([['reps', 'Reps'], ['time', 'Time']], draft.mode, (v) => { draft.mode = v; draw(); })),
+    inCircuit ? null : h('div', { class: 'grid-2' },
       field('Sets', stepper(draft.sets, { min: 1, onChange: (v) => (draft.sets = v) })),
       field('Rest', h('select', { class: 'input', onchange: (e) => (draft.rest = Number(e.target.value)) },
         restOpts.map((r) => h('option', { value: r, selected: r === draft.rest }, fmtRest(r)))))),
-    h('div', { class: 'grid-2' },
-      field('Reps (min)', stepper(draft.repsMin, { min: 1, onChange: (v) => (draft.repsMin = v) })),
-      field('Reps (max)', stepper(draft.repsMax, { min: 1, onChange: (v) => (draft.repsMax = v) }))),
-    h('div', { class: 'small muted', style: 'margin:-4px 0 12px' }, 'When you hit the max reps on every set, the app suggests adding weight.'),
-    field(`Weight increase (${unit()})`, stepper(draft.increment, { step: 0.5, min: 0, decimal: true, onChange: (v) => (draft.increment = v) })),
+    draft.mode === 'time'
+      ? field('Work time (seconds)', stepper(draft.duration, { step: 5, min: 5, onChange: (v) => (draft.duration = v) }))
+      : [
+        h('div', { class: 'grid-2' },
+          field('Reps (min)', stepper(draft.repsMin, { min: 1, onChange: (v) => (draft.repsMin = v) })),
+          field('Reps (max)', stepper(draft.repsMax, { min: 1, onChange: (v) => (draft.repsMax = v) }))),
+        h('div', { class: 'small muted', style: 'margin:-4px 0 12px' }, 'When you hit the max reps on every set, the app suggests adding weight.'),
+        field(`Weight increase (${unit()})`, stepper(draft.increment, { step: 0.5, min: 0, decimal: true, onChange: (v) => (draft.increment = v) })),
+      ],
     field('Notes', h('input', { class: 'input', value: draft.notes || '', placeholder: 'Optional', oninput: (e) => (draft.notes = e.target.value) })),
     h('button', { class: 'btn primary block big', onclick: () => {
       if (draft.repsMax < draft.repsMin) draft.repsMax = draft.repsMin;
       Object.assign(t, draft); closeSheet(); commit();
     } }, 'Save'),
-    supersetButtons(d.exercises, ti, () => { closeSheet(); commit(); }),
+    supersetButtons(list, ti, () => { closeSheet(); commit(); }, meta),
+    inCircuit ? h('button', { class: 'btn block', style: 'margin-top:8px', onclick: () => circuitSheet(list, meta, t.group, () => { closeSheet(); commit(); }) }, '⟳ Circuit settings') : null,
     h('div', { class: 'btn-row' },
-      h('button', { class: 'btn', disabled: ti === 0, onclick: () => move(-1) }, '↑'),
-      h('button', { class: 'btn', disabled: ti === d.exercises.length - 1, onclick: () => move(1) }, '↓'),
+      h('button', { class: 'btn', disabled: !canMove(list, meta, ti, -1), onclick: () => move(-1) }, '↑'),
+      h('button', { class: 'btn', disabled: !canMove(list, meta, ti, 1), onclick: () => move(1) }, '↓'),
       h('button', { class: 'btn', onclick: () => pickExercise((id) => { t.exerciseId = id; closeSheet(); commit(); }) }, 'Swap'),
-      h('button', { class: 'btn danger', onclick: () => { d.exercises.splice(ti, 1); L.normalizeGroups(d.exercises); closeSheet(); commit(); } }, 'Remove')));
+      h('button', { class: 'btn danger', onclick: () => { list.splice(ti, 1); L.normalizeGroups(list, meta); closeSheet(); commit(); } }, 'Remove')));
+  draw();
 }
 
 // =====================================================================
@@ -941,8 +1310,12 @@ function viewProgress() {
   if (!ui.progressEx || !exIds.includes(ui.progressEx)) ui.progressEx = exIds[0];
   const hist = L.exerciseHistory(data.sessions, ui.progressEx);
   const prs = L.personalRecords(data.sessions, ui.progressEx);
-  const metric = ui.progressMetric;
-  const metricLabel = { e1rm: 'Estimated 1-rep max', topWeight: 'Heaviest set', volume: 'Volume (weight × reps)' }[metric];
+  // Timed-only exercises (planks, rowing…) chart the longest set instead of weights.
+  const timedOnly = hist.every((p) => p.e1rm === 0) && hist.some((p) => p.maxTime > 0);
+  const metric = timedOnly ? 'maxTime' : ui.progressMetric;
+  const metricLabel = { e1rm: 'Estimated 1-rep max', topWeight: 'Heaviest set', volume: 'Volume (weight × reps)', maxTime: 'Longest set' }[metric];
+  const metricUnit = timedOnly ? 's' : unit();
+  const short = (iso) => fmtDate(iso, { day: 'numeric', month: 'short' });
 
   return h('div', {},
     topbar('Progress'),
@@ -953,28 +1326,33 @@ function viewProgress() {
     h('div', { class: 'card' },
       h('select', { class: 'input', 'aria-label': 'Exercise', onchange: (e) => { ui.progressEx = e.target.value; render(); } },
         exIds.map((id) => h('option', { value: id, selected: id === ui.progressEx }, exName(id)))),
-      h('div', { style: 'margin-top:10px' }, seg([['e1rm', 'Est. 1RM'], ['topWeight', 'Top set'], ['volume', 'Volume']], metric, (v) => { ui.progressMetric = v; render(); })),
-      h('div', { class: 'small muted', style: 'margin-top:10px' }, `${metricLabel} (${unit()})`),
-      lineChart(hist.map((p) => ({ x: p.date, y: metric === 'e1rm' ? L.roundTo(p.e1rm, 0.5) : p[metric], label: setsSummary(p.sets) })))),
+      timedOnly ? null : h('div', { style: 'margin-top:10px' }, seg([['e1rm', 'Est. 1RM'], ['topWeight', 'Top set'], ['volume', 'Volume']], metric, (v) => { ui.progressMetric = v; render(); })),
+      h('div', { class: 'small muted', style: 'margin-top:10px' }, `${metricLabel} (${metricUnit === 's' ? 'seconds' : metricUnit})`),
+      lineChart(hist.map((p) => ({ x: p.date, y: metric === 'e1rm' ? L.roundTo(p.e1rm, 0.5) : p[metric], label: setsSummary(p.sets) })), metricUnit)),
     h('div', { class: 'section-title' }, 'Personal records'),
-    h('div', { class: 'tiles' },
-      tile(fmtW(L.roundTo(prs.e1rm.e1rm, 0.5)), `Est. 1RM · ${fmtDate(prs.e1rm.date, { day: 'numeric', month: 'short' })}`),
-      tile(fmtW(prs.topWeight.topWeight), `Heaviest · ${fmtDate(prs.topWeight.date, { day: 'numeric', month: 'short' })}`),
-      tile(L.fmtNum(Math.round(prs.volume.volume)), `Best volume · ${fmtDate(prs.volume.date, { day: 'numeric', month: 'short' })}`)),
+    timedOnly
+      ? h('div', { class: 'tiles' },
+          tile(`${prs.maxTime.maxTime}s`, `Longest · ${short(prs.maxTime.date)}`),
+          tile(String(hist.length), 'Sessions'),
+          tile(`${hist[hist.length - 1].maxTime}s`, `Last · ${short(hist[hist.length - 1].date)}`))
+      : h('div', { class: 'tiles' },
+          tile(fmtW(L.roundTo(prs.e1rm.e1rm, 0.5)), `Est. 1RM · ${short(prs.e1rm.date)}`),
+          tile(fmtW(prs.topWeight.topWeight), `Heaviest · ${short(prs.topWeight.date)}`),
+          tile(L.fmtNum(Math.round(prs.volume.volume)), `Best volume · ${short(prs.volume.date)}`)),
     h('div', { class: 'section-title' }, 'History'),
     h('div', { class: 'card', style: 'padding:0 14px' }, hist.slice().reverse().slice(0, 20).map((p) =>
       h('button', { class: 'list-item', onclick: () => (location.hash = `#/workout/${p.sessionId}`) },
         h('div', { class: 'grow' },
           h('div', { class: 'small muted' }, fmtDate(p.date)),
           h('div', {}, setsSummary(p.sets))),
-        p.e1rm === prs.e1rm.e1rm ? h('span', { class: 'pr-badge' }, 'PR') : null))));
+        (timedOnly ? p.maxTime === prs.maxTime.maxTime : p.e1rm === prs.e1rm.e1rm) ? h('span', { class: 'pr-badge' }, 'PR') : null))));
 }
 
-function lineChart(points) {
+function lineChart(points, yUnit = unit()) {
   const wrap = h('div', { class: 'chart' });
   if (points.length < 2) {
     wrap.append(h('div', { class: 'small muted', style: 'padding:24px 0;text-align:center' },
-      points.length ? `One session so far: ${L.fmtNum(points[0].y)} ${unit()}. Log another to see a trend.` : 'No data'));
+      points.length ? `One session so far: ${L.fmtNum(points[0].y)}${yUnit === 's' ? 's' : ` ${yUnit}`}. Log another to see a trend.` : 'No data'));
     return wrap;
   }
   const W = 340, H = 190, padL = 36, padR = 10, padT = 12, padB = 24;
@@ -1013,7 +1391,7 @@ function lineChart(points) {
     cross.setAttribute('x1', X(p.x)); cross.setAttribute('x2', X(p.x)); cross.setAttribute('visibility', 'visible');
     pts.forEach((c, i) => c.setAttribute('r', i === best ? 6 : 4));
     tip.hidden = false;
-    tip.innerHTML = `<b>${esc(L.fmtNum(p.y))} ${esc(unit())}</b> · ${esc(shortD(p.x))}<br><span style="opacity:.8">${esc(p.label)}</span>`;
+    tip.innerHTML = `<b>${esc(L.fmtNum(p.y))}${esc(yUnit === 's' ? 's' : ` ${yUnit}`)}</b> · ${esc(shortD(p.x))}<br><span style="opacity:.8">${esc(p.label)}</span>`;
     const px = (X(p.x) / W) * r.width;
     tip.style.left = `${Math.min(r.width - 80, Math.max(80, px))}px`;
     tip.style.top = `-${tip.offsetHeight + 4}px`;
@@ -1143,7 +1521,7 @@ function render() {
   if (afterNav) { const f = afterNav; afterNav = null; f(); }
 }
 
-window.addEventListener('hashchange', () => { closeSheet(); render(); });
+window.addEventListener('hashchange', () => { closeSheet(); if (!location.hash.startsWith('#/workout')) closePlayer(); render(); });
 window.addEventListener('pagehide', () => flush(data));
 
 if (!location.hash) {
