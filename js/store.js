@@ -96,7 +96,8 @@ export function sampleProgramme(exercises) {
       { id: uid(), name: 'Upper A', exercises: [
         ex('Barbell Bench Press', 3, 5, 8, 180), ex('Barbell Row', 3, 6, 10, 150),
         ex('Overhead Press', 3, 6, 10, 150), ex('Lat Pulldown', 3, 8, 12, 90, 5),
-        ex('Dumbbell Curl', 2, 10, 15, 60, 1), ex('Triceps Pushdown', 2, 10, 15, 60, 2.5),
+        // Arms as a superset: alternate curl / pushdown, rest after each pair.
+        { ...ex('Dumbbell Curl', 2, 10, 15, 60, 1), group: 'arms' }, { ...ex('Triceps Pushdown', 2, 10, 15, 60, 2.5), group: 'arms' },
       ] },
       { id: uid(), name: 'Lower A', exercises: [
         ex('Back Squat', 3, 5, 8, 180, 5), ex('Romanian Deadlift', 3, 8, 10, 150, 5),

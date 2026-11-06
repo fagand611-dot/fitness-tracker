@@ -1,5 +1,5 @@
 // Offline support: cache the app shell, serve cache-first, refresh in background.
-const CACHE = 'liftlog-v1';
+const CACHE = 'liftlog-v2';
 const ASSETS = [
   './',
   './index.html',

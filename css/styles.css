@@ -168,6 +168,18 @@ textarea.input { min-height: 70px; resize: vertical; }
 tr.done .tick { background: var(--good); border-color: var(--good); color: #fff; }
 .elapsed { font-variant-numeric: tabular-nums; }
 
+tr.next .tick { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+tr.next td.n { color: var(--accent); }
+
+/* ---------- Supersets ---------- */
+.superset { border-left: 4px solid var(--accent); padding-left: 10px; margin: 0 0 12px; border-radius: 4px; }
+.superset > .card:last-child { margin-bottom: 0; }
+.superset-label { font-size: 13px; font-weight: 700; color: var(--accent); margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+.superset-label .muted { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.superset.compact { margin: 8px 0; padding-left: 8px; border-left-width: 3px; }
+.superset.compact .superset-label { margin: 0; }
+.superset.compact .list-item:first-of-type { border-top: 0; }
+
 /* ---------- Rest timer bar ---------- */
 .timer {
   position: fixed; left: 0; right: 0; bottom: calc(var(--nav-h) + var(--safe-b));

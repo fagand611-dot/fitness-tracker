@@ -173,10 +173,17 @@ function tick() {
   document.body.classList.add('timer-on');
   $timer.classList.toggle('over', left <= 0);
   const pct = Math.max(0, Math.min(1, 1 - left / timer.total)) * 100;
-  $timer.innerHTML = `
-    <div class="bar" style="width:${pct}%"></div>
-    <div class="t"><span class="lbl">${left > 0 ? 'Rest' : 'Go! Next set'}</span>${L.fmtDuration(Math.abs(left))}</div>
-    <button data-a="-15">−15</button><button data-a="15">+15</button><button data-a="x">${left > 0 ? 'Skip' : 'Close'}</button>`;
+  // Build once, then only update text, so taps on the buttons are never lost to a redraw.
+  if (!$timer.firstChild) {
+    $timer.innerHTML = `
+      <div class="bar"></div>
+      <div class="t"><span class="lbl"></span><span class="clock"></span></div>
+      <button data-a="-15">−15</button><button data-a="15">+15</button><button data-a="x"></button>`;
+  }
+  $timer.querySelector('.bar').style.width = `${pct}%`;
+  $timer.querySelector('.lbl').textContent = left > 0 ? 'Rest' : 'Go! Next set';
+  $timer.querySelector('.clock').textContent = L.fmtDuration(Math.abs(left));
+  $timer.querySelector('[data-a="x"]').textContent = left > 0 ? 'Skip' : 'Close';
 }
 $timer.addEventListener('click', (e) => {
   const a = e.target.closest('button')?.dataset.a;
@@ -221,6 +228,7 @@ function makeSessionExercise(t) {
     sets,
     suggestion,
     notes: t.notes || '',
+    group: t.group || undefined,
   };
 }
 
@@ -311,7 +319,12 @@ function viewWorkout(id) {
         ? h('input', { class: 'input', type: 'date', value: s.date, style: 'max-width:180px', onchange: (e) => { if (e.target.value) { s.date = e.target.value; commit(false); } } })
         : h('span', {}, fmtDate(s.date))));
 
-  const cards = s.exercises.map((ex, i) => exerciseCard(s, ex, i));
+  const next = editing ? null : L.nextSet(s.exercises);
+  const cards = L.groupBlocks(s.exercises).map((b, bi, all) => {
+    const inner = b.items.map(({ item, index }) => exerciseCard(s, item, index, next));
+    if (!b.group) return inner;
+    return supersetWrap(supersetLetter(all, bi), b.items.map(({ item }) => exName(item.exerciseId)), inner);
+  });
 
   return h('div', {},
     topbar(editing ? 'Edit workout' : 'Workout', { back: editing ? '#/calendar' : '#/today' }),
@@ -331,7 +344,7 @@ function viewWorkout(id) {
            h('button', { class: 'btn primary big', onclick: () => finishWorkout(s) }, 'Finish workout')]));
 }
 
-function exerciseCard(s, ex, idx) {
+function exerciseCard(s, ex, idx, next) {
   const editing = !!s.finishedAt;
   const last = L.lastPerformance(data.sessions, ex.exerciseId, s.id);
   const prevSets = last ? L.doneSets(last.exercise) : [];
@@ -339,7 +352,8 @@ function exerciseCard(s, ex, idx) {
   const sug = ex.suggestion;
 
   const rows = ex.sets.map((st, i) => {
-    const tr = h('tr', { class: st.done ? 'done' : '' },
+    const isNext = next && next[0] === idx && next[1] === i;
+    const tr = h('tr', { class: st.done ? 'done' : isNext ? 'next' : '' },
       h('td', { class: 'n' }, i + 1),
       h('td', { class: 'prev' }, prevSets[i] ? `${L.fmtNum(prevSets[i].weight)}×${prevSets[i].reps}` : '–'),
       h('td', {}, h('input', {
@@ -361,7 +375,13 @@ function exerciseCard(s, ex, idx) {
           // Carry this weight forward into later empty/untouched sets.
           if (st.done) {
             for (let j = i + 1; j < ex.sets.length; j++) if (!ex.sets[j].done && ex.sets[j].weight === '') ex.sets[j].weight = st.weight;
-            if (!editing) startRest(t.rest || data.settings.defaultRest);
+            if (!editing) {
+              if (L.shouldRestAfter(s.exercises, idx, i)) startRest(t.rest || data.settings.defaultRest);
+              else {
+                const n = L.nextSet(s.exercises);
+                if (n) toast(`Superset: straight to ${exName(s.exercises[n[0]].exerciseId)}`, 1600);
+              }
+            }
           }
           commit();
         },
@@ -394,6 +414,7 @@ function exerciseMenu(s, ex, idx) {
     const j = idx + d;
     if (j < 0 || j >= s.exercises.length) return;
     [s.exercises[idx], s.exercises[j]] = [s.exercises[j], s.exercises[idx]];
+    L.normalizeGroups(s.exercises);
     closeSheet();
     commit();
   };
@@ -404,6 +425,7 @@ function exerciseMenu(s, ex, idx) {
     h('div', { class: 'btn-row' },
       h('button', { class: 'btn', onclick: () => move(-1), disabled: idx === 0 }, '↑ Move up'),
       h('button', { class: 'btn', onclick: () => move(1), disabled: idx === s.exercises.length - 1 }, '↓ Move down')),
+    supersetButtons(s.exercises, idx, () => { closeSheet(); commit(); }),
     h('div', { class: 'btn-row' },
       h('button', { class: 'btn', onclick: () => pickExercise((id) => {
         ex.exerciseId = id;
@@ -414,7 +436,32 @@ function exerciseMenu(s, ex, idx) {
         closeSheet();
         commit();
       }) }, '⇄ Swap exercise'),
-      h('button', { class: 'btn danger', onclick: () => { if (confirm('Remove this exercise from the workout?')) { s.exercises.splice(idx, 1); closeSheet(); commit(); } } }, 'Remove')));
+      h('button', { class: 'btn danger', onclick: () => { if (confirm('Remove this exercise from the workout?')) { s.exercises.splice(idx, 1); L.normalizeGroups(s.exercises); closeSheet(); commit(); } } }, 'Remove')));
+}
+
+// =====================================================================
+// Supersets (shared by programme editor and workout)
+// =====================================================================
+function supersetLetter(blocks, bi) {
+  const n = blocks.slice(0, bi + 1).filter((b) => b.group).length;
+  return String.fromCharCode(64 + n);
+}
+
+function supersetWrap(letter, names, inner) {
+  return h('div', { class: 'superset' },
+    h('div', { class: 'superset-label' }, `Superset ${letter}`, h('span', { class: 'muted' }, ` · alternate ${names.join(' ↔ ')}, rest after each round`)),
+    inner);
+}
+
+function supersetButtons(list, i, done) {
+  const it = list[i];
+  const inSuperset = L.groupBlocks(list).some((b) => b.group && b.items.some((x) => x.index === i));
+  const nextLinked = inSuperset && list[i + 1] && list[i + 1].group === it.group;
+  return h('div', { class: 'btn-row' },
+    list[i + 1] && !nextLinked
+      ? h('button', { class: 'btn', onclick: () => { L.linkWithNext(list, i); done(); } }, `⛓ Superset with ${exName(list[i + 1].exerciseId)}`)
+      : null,
+    inSuperset ? h('button', { class: 'btn', onclick: () => { L.unlinkItem(list, i); done(); } }, 'Remove from superset') : null);
 }
 
 // =====================================================================
@@ -756,10 +803,13 @@ function viewProgrammeEdit(id) {
     h('div', { class: 'row' },
       h('input', { class: 'input title-input grow', value: d.name, 'aria-label': 'Day name', oninput: (e) => { d.name = e.target.value; commit(false); } }),
       h('button', { class: 'icon-btn', 'aria-label': 'Day options', onclick: () => dayMenu(p, d, di) }, '⋯')),
-    d.exercises.length ? h('div', {}, d.exercises.map((t, ti) => h('button', { class: 'list-item', onclick: () => editTarget(p, d, ti) },
-      h('span', { class: 'muted small', style: 'width:18px' }, ti + 1),
-      h('div', { class: 'grow' }, h('div', {}, exName(t.exerciseId)), h('div', { class: 'small muted' }, targetText(t))),
-      h('span', { class: 'chev' }, '›'))))
+    d.exercises.length ? h('div', {}, L.groupBlocks(d.exercises).map((b, bi, all) => {
+      const rows = b.items.map(({ item: t, index: ti }) => h('button', { class: 'list-item', onclick: () => editTarget(p, d, ti) },
+        h('span', { class: 'muted small', style: 'width:18px' }, ti + 1),
+        h('div', { class: 'grow' }, h('div', {}, exName(t.exerciseId)), h('div', { class: 'small muted' }, targetText(t))),
+        h('span', { class: 'chev' }, '›')));
+      return b.group ? h('div', { class: 'superset compact' }, h('div', { class: 'superset-label' }, `Superset ${supersetLetter(all, bi)}`), rows) : rows;
+    }))
       : h('div', { class: 'small muted', style: 'padding:6px 0' }, 'No exercises yet.'),
     h('button', { class: 'btn ghost sm', style: 'margin-top:4px', onclick: () => pickExercise((exId) => {
       d.exercises.push({ id: L.uid(), exerciseId: exId, sets: 3, repsMin: 8, repsMax: 12, rest: data.settings.defaultRest, increment: data.settings.increment, notes: '' });
@@ -840,6 +890,7 @@ function editTarget(p, d, ti) {
     const j = ti + dir;
     if (j < 0 || j >= d.exercises.length) return;
     [d.exercises[ti], d.exercises[j]] = [d.exercises[j], d.exercises[ti]];
+    L.normalizeGroups(d.exercises);
     closeSheet(); commit();
   };
   openSheet(exName(t.exerciseId),
@@ -857,11 +908,12 @@ function editTarget(p, d, ti) {
       if (draft.repsMax < draft.repsMin) draft.repsMax = draft.repsMin;
       Object.assign(t, draft); closeSheet(); commit();
     } }, 'Save'),
+    supersetButtons(d.exercises, ti, () => { closeSheet(); commit(); }),
     h('div', { class: 'btn-row' },
       h('button', { class: 'btn', disabled: ti === 0, onclick: () => move(-1) }, '↑'),
       h('button', { class: 'btn', disabled: ti === d.exercises.length - 1, onclick: () => move(1) }, '↓'),
       h('button', { class: 'btn', onclick: () => pickExercise((id) => { t.exerciseId = id; closeSheet(); commit(); }) }, 'Swap'),
-      h('button', { class: 'btn danger', onclick: () => { d.exercises.splice(ti, 1); closeSheet(); commit(); } }, 'Remove')));
+      h('button', { class: 'btn danger', onclick: () => { d.exercises.splice(ti, 1); L.normalizeGroups(d.exercises); closeSheet(); commit(); } }, 'Remove')));
 }
 
 // =====================================================================

@@ -109,3 +109,41 @@ test('CSV export escapes and includes sets', () => {
   assert.equal(lines.length, 2);
   assert.equal(lines[1], '2026-11-01,Prog,Day A,"Bench, Flat",1,60,10,80,');
 });
+
+const ss = (group, n) => ({ group, sets: Array.from({ length: n }, () => ({ done: false })) });
+
+test('groupBlocks only links consecutive items; singletons are not supersets', () => {
+  const b = L.groupBlocks([ss(null, 1), ss('g', 1), ss('g', 1), ss('h', 1), ss('g', 1)]);
+  assert.deepEqual(b.map((x) => [x.group, x.items.length]), [[null, 1], ['g', 2], [null, 1], [null, 1]]);
+});
+
+test('linkWithNext / unlinkItem', () => {
+  const list = [{}, {}, {}, {}];
+  L.linkWithNext(list, 0);
+  L.linkWithNext(list, 1); // three-way superset
+  assert.ok(list[0].group && list[0].group === list[1].group && list[1].group === list[2].group);
+  assert.equal(list[3].group, undefined);
+  L.unlinkItem(list, 0);
+  assert.equal(list[0].group, undefined);
+  assert.ok(list[1].group && list[1].group === list[2].group);
+  L.unlinkItem(list, 1); // leaves list[2] alone -> cleaned up
+  assert.equal(list[1].group, undefined);
+  assert.equal(list[2].group, undefined);
+  // merging two existing groups
+  const m = [{}, {}, {}, {}];
+  L.linkWithNext(m, 0); L.linkWithNext(m, 2); L.linkWithNext(m, 1);
+  assert.equal(new Set(m.map((x) => x.group)).size, 1);
+});
+
+test('setOrder alternates within supersets; nextSet and rest rules', () => {
+  const ex = [ss(null, 2), ss('g', 2), ss('g', 3), ss(null, 1)];
+  assert.deepEqual(L.setOrder(ex), [[0, 0], [0, 1], [1, 0], [2, 0], [1, 1], [2, 1], [2, 2], [3, 0]]);
+  ex[0].sets.forEach((s) => (s.done = true));
+  ex[1].sets[0].done = true;
+  assert.deepEqual(L.nextSet(ex), [2, 0]);
+  assert.equal(L.shouldRestAfter(ex, 0, 0), true);  // normal exercise
+  assert.equal(L.shouldRestAfter(ex, 1, 0), false); // A1 -> go straight to B1
+  assert.equal(L.shouldRestAfter(ex, 2, 0), true);  // B1 ends the round
+  assert.equal(L.shouldRestAfter(ex, 1, 1), false);
+  assert.equal(L.shouldRestAfter(ex, 2, 2), true);  // B3 (A has no 3rd set)
+});

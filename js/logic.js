@@ -251,3 +251,84 @@ export function sessionsToCSV(data) {
   }
   return rows.map((r) => r.map(esc).join(',')).join('\n');
 }
+
+// ---------- Supersets ----------
+// An exercise belongs to a superset when it shares a `group` id with its
+// neighbour(s). Only *consecutive* items with the same group are linked.
+
+/** Split a list into blocks of consecutive items sharing a group. Returns [{group, items:[{item, index}]}]. */
+export function groupBlocks(list) {
+  const blocks = [];
+  list.forEach((item, index) => {
+    const prev = blocks[blocks.length - 1];
+    if (item.group && prev && prev.group === item.group) prev.items.push({ item, index });
+    else blocks.push({ group: item.group || null, items: [{ item, index }] });
+  });
+  // A "group" of one isn't a superset.
+  for (const b of blocks) if (b.items.length < 2) b.group = null;
+  return blocks;
+}
+
+/** Link item i with item i+1 into one superset (merging existing groups). Mutates list. */
+export function linkWithNext(list, i) {
+  const a = list[i], b = list[i + 1];
+  if (!a || !b) return list;
+  const g = a.group || b.group || uid();
+  const old = [a.group, b.group].filter((x) => x && x !== g);
+  for (const it of list) if (old.includes(it.group)) it.group = g;
+  a.group = g;
+  b.group = g;
+  return normalizeGroups(list);
+}
+
+/** Remove item i from its superset. Mutates list. */
+export function unlinkItem(list, i) {
+  const it = list[i];
+  if (!it?.group) return list;
+  const g = it.group;
+  delete it.group;
+  // Items after i in the same block become a separate group so they stay linked to each other.
+  const ng = uid();
+  for (let j = i + 1; j < list.length && list[j].group === g; j++) list[j].group = ng;
+  return normalizeGroups(list);
+}
+
+/** Drop group ids that don't link at least two consecutive items. */
+export function normalizeGroups(list) {
+  for (const b of groupBlocks(list)) if (!b.group) for (const { item } of b.items) delete item.group;
+  return list;
+}
+
+/**
+ * Order in which sets should be performed: normal exercises set by set,
+ * supersets alternate (A1, B1, A2, B2, ...). Returns [[exerciseIndex, setIndex], ...].
+ */
+export function setOrder(exercises) {
+  const out = [];
+  for (const b of groupBlocks(exercises)) {
+    const rounds = Math.max(...b.items.map(({ item }) => item.sets.length));
+    if (!b.group) {
+      const { item, index } = b.items[0];
+      item.sets.forEach((_, s) => out.push([index, s]));
+      continue;
+    }
+    for (let r = 0; r < rounds; r++) for (const { item, index } of b.items) if (r < item.sets.length) out.push([index, r]);
+  }
+  return out;
+}
+
+/** The [exerciseIndex, setIndex] of the next set to do, or null when all done. */
+export function nextSet(exercises) {
+  return setOrder(exercises).find(([e, s]) => !exercises[e].sets[s].done) || null;
+}
+
+/**
+ * After ticking set `s` of exercise `e`, should the rest timer start?
+ * In a superset only after the last exercise of the round that still has sets.
+ */
+export function shouldRestAfter(exercises, e, s) {
+  const block = groupBlocks(exercises).find((b) => b.items.some((x) => x.index === e));
+  if (!block?.group) return true;
+  const laterInRound = block.items.filter((x) => x.index > e && x.item.sets.length > s);
+  return laterInRound.length === 0;
+}
