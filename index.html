@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lift Log</title>
+  <meta name="description" content="Simple weight-training tracker: build programmes, schedule them, log sets.">
+  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lift Log">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div id="app"></div>
+  <div id="timer" class="timer" hidden></div>
+  <nav id="nav" class="nav">
+    <a href="#/today" data-tab="today"><span class="ico">●</span>Today</a>
+    <a href="#/calendar" data-tab="calendar"><span class="ico">▦</span>Calendar</a>
+    <a href="#/programmes" data-tab="programmes"><span class="ico">≡</span>Programmes</a>
+    <a href="#/progress" data-tab="progress"><span class="ico">↗</span>Progress</a>
+    <a href="#/settings" data-tab="settings"><span class="ico">⚙</span>Settings</a>
+  </nav>
+  <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+  <div id="sheet" class="sheet" hidden role="dialog" aria-modal="true"></div>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
